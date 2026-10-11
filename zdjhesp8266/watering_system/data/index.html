@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>自动浇水控制台</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 0 auto; padding: 16px; background:#f4f6f5; color:#222; }
+  h2 { margin-top: 24px; }
+  .card { background:#fff; border-radius:10px; padding:14px; margin-bottom:14px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .row { display:flex; justify-content:space-between; align-items:center; margin:6px 0; }
+  button { padding:8px 14px; border:none; border-radius:6px; background:#2e7d32; color:#fff; font-size:14px; }
+  button.off { background:#c62828; }
+  input[type=number] { width:60px; }
+  .task { border-top:1px solid #eee; padding:8px 0; }
+  .day-btn { display:inline-block; width:22px; height:22px; line-height:22px; text-align:center; border-radius:50%; background:#ddd; margin-right:3px; font-size:12px; cursor:pointer; }
+  .day-btn.on { background:#2e7d32; color:#fff; }
+  pre#logbox { max-height:200px; overflow:auto; background:#111; color:#0f0; padding:8px; font-size:11px; }
+</style>
+</head>
+<body>
+<h1>🌱 自动浇水控制台</h1>
+
+<div class="card" id="wifiCard">
+  <h3>WiFi管理</h3>
+  <div class="row"><span>当前模式</span><b id="wifiMode">--</b></div>
+  <div class="row"><span>SSID</span><span id="wifiSsidShow">--</span></div>
+  <div class="row"><span>设备地址</span><span id="wifiIpShow">--</span></div>
+  <div class="row"><span>连接的AP(BSSID)</span><span id="wifiBssidShow">--</span></div>
+  <div class="row"><span>信道</span><span id="wifiChannelShow">--</span></div>
+  <div id="apModeHint" style="display:none; font-size:13px; color:#c62828; margin:6px 0;">
+    当前处于配置热点模式，网络功能受限（无法自动浇水的定时任务、无法对时），请尽快完成WiFi配置。
+  </div>
+  <div class="row">
+    <button onclick="scanWifi()">扫描附近WiFi</button>
+  </div>
+  <div class="row">
+    <select id="wifiSelect" style="flex:1; margin-right:8px;"><option value="">-- 扫描后在此选择 --</option></select>
+  </div>
+  <div class="row">
+    SSID(可手动填) <input type="text" id="wifiSsidInput" style="flex:1; width:auto;">
+  </div>
+  <div class="row">
+    密码 <input type="password" id="wifiPassInput" style="flex:1; width:auto;">
+  </div>
+  <button onclick="saveWifi()">连接并保存</button>
+  <p style="font-size:12px;color:#888;margin-top:8px;">
+    保存后设备会自动重启并尝试连接，若成功，此热点会消失，请重新用你的手机/电脑连接家里WiFi，
+    再访问设备在新网络下分配到的IP（可用路由器管理页面查看，或用串口监视器读取）。
+  </p>
+</div>
+
+<div class="card">
+  <div class="row"><span>土壤湿度</span><b id="moisture">--%</b></div>
+  <div class="row"><span>水泵状态</span><b id="pumpState">--</b></div>
+  <div class="row"><span>WiFi信号</span><span id="rssi">--</span></div>
+  <div class="row"><span>设备时间</span><span id="devtime">--</span></div>
+  <div class="row" id="ntpWarnRow" style="display:none;"><span style="color:#c62828;">⚠ 时间未与网络同步，定时任务可能不准</span></div>
+</div>
+
+<div class="card">
+  <h3>手动浇水</h3>
+  <div class="row">
+    时长(秒) <input type="number" id="manualDuration" value="10">
+    <button onclick="manualPump('on')">立即浇水</button>
+    <button class="off" onclick="manualPump('off')">停止</button>
+  </div>
+</div>
+
+<div class="card">
+  <h3>湿度校准</h3>
+  <div class="row"><span>当前原始ADC读数</span><b id="rawAdc">--</b></div>
+  <div class="row"><span>当前湿度</span><b id="calibPct">--</b></div>
+  <div class="row">
+    <span>干燥基准(空气中)</span>
+    <span>
+      <input type="number" id="calDry" min="0" max="1023" oninput="updateCalibWarn()" style="width:70px">
+      <button onclick="sampleRaw('dry')">自动获取</button>
+    </span>
+  </div>
+  <div class="row">
+    <span>湿润基准(插入水中)</span>
+    <span>
+      <input type="number" id="calWet" min="0" max="1023" oninput="updateCalibWarn()" style="width:70px">
+      <button onclick="sampleRaw('wet')">自动获取</button>
+    </span>
+  </div>
+  <div id="calibWarn" style="font-size:13px;color:#c62828;min-height:16px;"></div>
+  <p style="font-size:13px;color:#666;margin:6px 0;">
+    自动获取：把探头置于对应环境(干燥基准=擦干悬空，湿润基准=插入清水)，等读数稳定后点"自动获取"，
+    会连续采样16次取平均并填入输入框。也可以直接手动输入数值(0-1023)。
+    填好后点"保存校准"才会生效，两个基准值不能相同。
+  </p>
+  <button onclick="saveCalibration()">保存校准</button>
+</div>
+
+<div class="card">
+  <h3>自动浇水配置</h3>
+  <div class="row">启用自动浇水 <input type="checkbox" id="autoEnabled"></div>
+  <div class="row">低于阈值(%) 开始 <input type="number" id="thOn"></div>
+  <div class="row">达到阈值(%) 停止 <input type="number" id="thOff"></div>
+  <div class="row">单次时长(秒) <input type="number" id="autoSec"></div>
+  <div class="row">冷却间隔(分钟) <input type="number" id="cooldown"></div>
+  <button onclick="saveConfig()">保存配置</button>
+</div>
+
+<div class="card">
+  <h3>定时任务</h3>
+  <div id="taskList"></div>
+  <div class="row">
+    时:分 <input type="number" id="newHour" min="0" max="23" value="6" style="width:40px">
+    :<input type="number" id="newMinute" min="0" max="59" value="0" style="width:40px">
+    时长(秒)<input type="number" id="newDuration" value="10">
+  </div>
+  <div id="newDays"></div>
+  <button onclick="addTask()">新增任务</button>
+</div>
+
+<div class="card">
+  <h3>日志服务器(日志上送)</h3>
+  <div class="row">启用上送 <input type="checkbox" id="lsEnabled"></div>
+  <div class="row">协议
+    <select id="lsType" onchange="lsTypeChanged()">
+      <option value="syslog">Syslog (UDP)</option>
+      <option value="http">HTTP POST (JSON)</option>
+    </select>
+  </div>
+  <div class="row">服务器地址 <input type="text" id="lsHost" placeholder="IP或域名" style="flex:1; width:auto; margin-left:8px;"></div>
+  <div class="row">端口 <input type="number" id="lsPort" style="width:80px"></div>
+  <div class="row" id="lsPathRow" style="display:none;">路径 <input type="text" id="lsPath" placeholder="/log" style="flex:1; width:auto; margin-left:8px;"></div>
+  <div class="row">
+    <button onclick="saveLogServer()">保存</button>
+    <button onclick="testLogServer()">发送测试日志</button>
+  </div>
+  <div id="lsStats" style="font-size:12px;color:#666;margin-top:6px;">--</div>
+  <p style="font-size:12px;color:#888;margin-top:6px;">
+    Syslog默认514/UDP(RFC5424格式)；HTTP为明文POST，body为JSON：{"device":"...","logs":[{"time":"...","msg":"..."}]}，返回2xx视为成功。
+    联网时才会上送，上送失败会自动退避重试，设备内最多暂存16条待发日志。
+  </p>
+</div>
+
+<div class="card">
+  <h3>运行日志</h3>
+  <pre id="logbox"></pre>
+</div>
+
+<script>
+const DAYS = ['日','一','二','三','四','五','六'];
+let newDaySel = [false,false,false,false,false,false,false];
+
+function renderNewDays() {
+  const el = document.getElementById('newDays');
+  el.innerHTML = DAYS.map((d,i)=>`<span class="day-btn ${newDaySel[i]?'on':''}" onclick="toggleNewDay(${i})">${d}</span>`).join('');
+}
+function toggleNewDay(i){ newDaySel[i]=!newDaySel[i]; renderNewDays(); }
+renderNewDays();
+
+let lastRawAdc = null;
+
+async function refreshWifiStatus() {
+  try {
+    const r = await fetch('/api/wifi/status'); const d = await r.json();
+    document.getElementById('wifiMode').innerText = d.apMode ? '配置热点模式' : (d.connected ? '已连接' : '未连接');
+    document.getElementById('wifiSsidShow').innerText = d.ssid || '--';
+    document.getElementById('wifiIpShow').innerText = d.ip || '--';
+    document.getElementById('apModeHint').style.display = d.apMode ? 'block' : 'none';
+    if (d.savedSsid) document.getElementById('wifiSsidInput').placeholder = '当前保存: ' + d.savedSsid;
+  } catch (e) { /* AP模式切换重启期间请求可能暂时失败，忽略 */ }
+}
+
+async function scanWifi() {
+  const sel = document.getElementById('wifiSelect');
+  sel.innerHTML = '<option value="">扫描中...</option>';
+  try {
+    const r = await fetch('/api/wifi/scan'); const list = await r.json();
+    sel.innerHTML = '<option value="">-- 请选择 --</option>' +
+      list.sort((a,b)=>b.rssi-a.rssi).map(n =>
+        `<option value="${n.ssid}">${n.ssid} (${n.rssi}dBm)${n.secure ? ' 🔒' : ''}</option>`
+      ).join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">扫描失败，请重试</option>';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('wifiSelect')?.addEventListener('change', function() {
+    if (this.value) document.getElementById('wifiSsidInput').value = this.value;
+  });
+});
+
+async function saveWifi() {
+  const ssid = document.getElementById('wifiSsidInput').value.trim();
+  const password = document.getElementById('wifiPassInput').value;
+  if (!ssid) { alert('请先选择或填写SSID'); return; }
+  if (!confirm('确认保存并重启设备尝试连接 "' + ssid + '" 吗？')) return;
+  try {
+    await fetch('/api/wifi/config', { method:'POST', body: JSON.stringify({ssid, password}) });
+  } catch (e) { /* 设备保存后立刻重启，请求可能来不及返回，属正常现象 */ }
+  alert('已提交，设备正在重启尝试连接，请稍候10余秒。若连接成功，此热点会消失，请重新连接你的家庭WiFi再访问设备。');
+}
+
+async function refreshStatus() {
+  const r = await fetch('/api/status'); const d = await r.json();
+  document.getElementById('moisture').innerText = d.moisture + '%';
+  document.getElementById('pumpState').innerText = d.pump ? '浇水中' : '关闭';
+  document.getElementById('rssi').innerText = d.rssi + ' dBm';
+  document.getElementById('wifiBssidShow').innerText = d.bssid || '--';
+  document.getElementById('wifiChannelShow').innerText = d.channel || '--';
+  document.getElementById('devtime').innerText = d.time;
+  document.getElementById('ntpWarnRow').style.display = d.ntpSynced ? 'none' : 'flex';
+  lastRawAdc = d.rawAdc;
+  document.getElementById('rawAdc').innerText = d.rawAdc;
+  document.getElementById('calibPct').innerText = d.moisture + '%';
+}
+
+async function sampleRaw(type) {
+  try {
+    const r = await fetch('/api/raw'); const d = await r.json();
+    document.getElementById(type === 'dry' ? 'calDry' : 'calWet').value = d.raw;
+    updateCalibWarn();
+  } catch (e) { alert('读取失败，请重试'); }
+}
+
+function updateCalibWarn() {
+  const dry = parseInt(document.getElementById('calDry').value);
+  const wet = parseInt(document.getElementById('calWet').value);
+  let msg = '';
+  if (!isNaN(dry) && !isNaN(wet)) {
+    if (dry === wet) msg = '⚠ 干燥和湿润基准不能相同';
+    else if (Math.abs(dry - wet) < 100) msg = '⚠ 两者差值过小(<100)，湿度百分比会很不准，建议重新测量';
+  }
+  document.getElementById('calibWarn').innerText = msg;
+}
+
+async function saveCalibration() {
+  const dry = parseInt(document.getElementById('calDry').value);
+  const wet = parseInt(document.getElementById('calWet').value);
+  if (isNaN(dry) || isNaN(wet)) { alert('请填写或自动获取两个基准值'); return; }
+  if (dry < 0 || dry > 1023 || wet < 0 || wet > 1023) { alert('数值范围应为0-1023'); return; }
+  if (dry === wet) { alert('干燥和湿润基准不能相同'); return; }
+  const r = await fetch('/api/config', { method:'POST', body: JSON.stringify({ adcDry: dry, adcWet: wet }) });
+  if (!r.ok) { alert('保存失败: ' + await r.text()); return; }
+  alert('校准值已保存');
+  loadConfig();
+}
+
+async function manualPump(action) {
+  const duration = parseInt(document.getElementById('manualDuration').value || '10');
+  await fetch('/api/pump', { method:'POST', body: JSON.stringify({action, durationSeconds: duration}) });
+  refreshStatus();
+}
+
+async function loadConfig() {
+  const r = await fetch('/api/config'); const c = await r.json();
+  document.getElementById('autoEnabled').checked = c.autoModeEnabled;
+  document.getElementById('thOn').value = c.moistureThresholdOn;
+  document.getElementById('thOff').value = c.moistureThresholdOff;
+  document.getElementById('autoSec').value = c.autoWaterSeconds;
+  document.getElementById('cooldown').value = c.autoCooldownMinutes;
+  document.getElementById('calDry').value = c.adcDry;
+  document.getElementById('calWet').value = c.adcWet;
+  updateCalibWarn();
+}
+
+async function saveConfig() {
+  const body = {
+    autoModeEnabled: document.getElementById('autoEnabled').checked,
+    moistureThresholdOn: parseInt(document.getElementById('thOn').value),
+    moistureThresholdOff: parseInt(document.getElementById('thOff').value),
+    autoWaterSeconds: parseInt(document.getElementById('autoSec').value),
+    autoCooldownMinutes: parseInt(document.getElementById('cooldown').value)
+  };
+  await fetch('/api/config', { method:'POST', body: JSON.stringify(body) });
+  alert('已保存');
+}
+
+async function loadTasks() {
+  const r = await fetch('/api/tasks'); const list = await r.json();
+  const el = document.getElementById('taskList');
+  el.innerHTML = list.map(t => {
+    const dayStr = DAYS.filter((d,i)=>t.days[i]).join('');
+    return `<div class="task">
+      <div class="row">
+        <span>${String(t.hour).padStart(2,'0')}:${String(t.minute).padStart(2,'0')} 浇${t.durationSeconds}s [${dayStr}]</span>
+        <span>
+          <input type="checkbox" ${t.enabled?'checked':''} onchange="toggleTask('${t.id}', this.checked, ${t.hour}, ${t.minute}, ${t.durationSeconds}, [${t.days}])">
+          <button class="off" onclick="deleteTask('${t.id}')">删除</button>
+        </span>
+      </div>
+    </div>`;
+  }).join('') || '<i>暂无定时任务</i>';
+}
+
+async function addTask() {
+  const body = {
+    enabled: true,
+    hour: parseInt(document.getElementById('newHour').value),
+    minute: parseInt(document.getElementById('newMinute').value),
+    durationSeconds: parseInt(document.getElementById('newDuration').value),
+    days: newDaySel
+  };
+  await fetch('/api/tasks', { method:'POST', body: JSON.stringify(body) });
+  loadTasks();
+}
+
+async function toggleTask(id, enabled, hour, minute, durationSeconds, days) {
+  await fetch('/api/tasks', { method:'POST', body: JSON.stringify({id, enabled, hour, minute, durationSeconds, days}) });
+  loadTasks();
+}
+
+async function deleteTask(id) {
+  await fetch('/api/tasks/' + id, { method:'DELETE' });
+  loadTasks();
+}
+
+function lsTypeChanged() {
+  const t = document.getElementById('lsType').value;
+  document.getElementById('lsPathRow').style.display = t === 'http' ? 'flex' : 'none';
+  const portEl = document.getElementById('lsPort');
+  if (t === 'http' && portEl.value === '514') portEl.value = 80;
+  if (t === 'syslog' && portEl.value === '80') portEl.value = 514;
+}
+
+async function loadLogServer(fillForm) {
+  try {
+    const r = await fetch('/api/logserver'); const c = await r.json();
+    if (fillForm) {
+      document.getElementById('lsEnabled').checked = c.enabled;
+      document.getElementById('lsType').value = c.type;
+      document.getElementById('lsHost').value = c.host;
+      document.getElementById('lsPort').value = c.port;
+      document.getElementById('lsPath').value = c.path;
+      document.getElementById('lsPathRow').style.display = c.type === 'http' ? 'flex' : 'none';
+    }
+    document.getElementById('lsStats').innerText =
+      '待发送 ' + c.queued + ' 条 | 已发送 ' + c.sent + ' | 失败次数 ' + c.failed + ' | 丢弃 ' + c.dropped +
+      (c.lastError ? ' | 最近错误: ' + c.lastError : '');
+  } catch (e) { /* 忽略瞬时失败 */ }
+}
+
+async function saveLogServer() {
+  const body = {
+    enabled: document.getElementById('lsEnabled').checked,
+    type: document.getElementById('lsType').value,
+    host: document.getElementById('lsHost').value.trim(),
+    port: parseInt(document.getElementById('lsPort').value),
+    path: document.getElementById('lsPath').value.trim()
+  };
+  const r = await fetch('/api/logserver', { method:'POST', body: JSON.stringify(body) });
+  if (!r.ok) { alert('保存失败: ' + await r.text()); return; }
+  alert('日志服务器配置已保存');
+  loadLogServer(true);
+}
+
+async function testLogServer() {
+  const r = await fetch('/api/logserver/test', { method:'POST' });
+  if (!r.ok) { alert('请先启用并保存日志服务器配置'); return; }
+  setTimeout(() => loadLogServer(false), 1500);
+}
+
+async function loadLogs() {
+  const r = await fetch('/api/logs'); const t = await r.text();
+  const box = document.getElementById('logbox');
+  box.textContent = t;
+  box.scrollTop = box.scrollHeight;
+}
+
+refreshStatus(); loadConfig(); loadTasks(); loadLogs(); refreshWifiStatus(); loadLogServer(true);
+setInterval(refreshStatus, 5000);
+setInterval(loadLogs, 15000);
+setInterval(refreshWifiStatus, 10000);
+setInterval(() => loadLogServer(false), 10000);
+</script>
+</body>
+</html>
